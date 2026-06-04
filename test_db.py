@@ -54,7 +54,7 @@ def seed_operational_master_records():
             # Use upsert to safely bypass duplicate constraint failures if run multiple times
             supabase.table("customers").upsert(chunk, on_conflict="loyalty_card_number").execute()
             
-        print("✔️ 'customers' database rows uploaded cleanly.")
+        print("✔ 'customers' database rows uploaded cleanly.")
 
         # -------------------------------------------------------------------
         # 2. POPULATE INVENTORY TABLE
@@ -94,10 +94,10 @@ def seed_operational_master_records():
             supabase.table("inventory").upsert(inv_payloads).execute()
         
         print(f"✔️ 'inventory' data seed metrics live! (Skipped {unmatched_products} records with unmatched product keys)")
-        print("\n🚀 SEQUENTIAL INGESTION PIPELINE FULLY EXECUTED!")
+        print("\n SEQUENTIAL INGESTION PIPELINE FULLY EXECUTED!")
 
     except Exception as e:
-        print(f"\n❌ Pipeline Aborted prematurely: {e}")
+        print(f"\n Pipeline Aborted prematurely: {e}")
 
 if __name__ == "__main__":
     seed_operational_master_records()

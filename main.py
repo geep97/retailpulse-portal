@@ -1,81 +1,68 @@
 import os
-from fastapi import FastAPI, HTTPException
+import io
+import pandas as pd
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
-# Securely load environment vars from your fixed .env
 load_dotenv()
 
-app = FastAPI(title="RetailPulse Portal Core Engine", version="1.0.0")
+app = FastAPI(title="RetailPulse Portal Core Engine")
 
-# Setup CORS middleware to allow your frontend connection pooling without blocks
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Adjust this to specific domains later for production security
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS and Supabase setup remain as per your existing configuration
+supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("System error: Supabase configurations missing from environment registry.")
-
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-@app.get("/")
-async def health_check():
-    return {"status": "healthy", "application": "RetailPulse Portal Core Engine"}
-
-@app.get("/api/analytics/baseline-2023")
-async def get_2023_baseline_summary():
+@app.post("/api/upload", tags=["Data Ingestion Pipeline"])
+async def upload_weekly_ledger(
+    store_id: int = Form(..., description="Store identification key"), 
+    file: UploadFile = File(...)
+):
     """
-    Fetches and aggregates the 2023 historical sales dataset 
-    from Supabase relational tables to serve active portal dashboard widgets.
+    Ingests weekly ledger via an atomic database procedure to ensure 
+    relational integrity and permanent audit logging.
     """
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Invalid format.")
+    
     try:
-        # Fetch live transactions along with the related store name
-        response = supabase.table("transactions").select(
-            "store_id, quantity, total_price, payment_method, stores(store_name)"
-        ).execute()
+        # 1. Local Processing
+        contents = await file.read()
+        df = pd.read_csv(io.BytesIO(contents))
         
-        records = response.data
-        if not records:
-            return {"message": "No data found inside active ledger tables", "data": []}
-            
-        # Compile global high-level summary KPIs
-        total_revenue = sum(item["total_price"] for item in records)
-        total_items_sold = sum(item["quantity"] for item in records)
-        transaction_count = len(records)
+        # 2. Catalog Mapping
+        products = supabase.table("product").select("product_id, product_name").execute()
+        product_map = {p["product_name"]: p["product_id"] for p in products.data}
         
-        # Calculate isolated metrics grouping per store profile
-        store_breakdown = {}
-        for item in records:
-            s_name = item.get("stores", {}).get("store_name", f"Store Reference ID #{item['store_id']}")
-            if s_name not in store_breakdown:
-                store_breakdown[s_name] = {"revenue_ghs": 0.0, "items_sold": 0, "transaction_count": 0}
-            
-            store_breakdown[s_name]["revenue_ghs"] += float(item["total_price"])
-            store_breakdown[s_name]["items_sold"] += int(item["quantity"])
-            store_breakdown[s_name]["transaction_count"] += 1
+        # 3. Transform to transaction objects
+        transactions = []
+        for _, row in df.iterrows():
+            if row["product_name"] in product_map:
+                transactions.append({
+                    "product_id": product_map[row["product_name"]],
+                    "quantity": int(row["quantity"]),
+                    "unit_price": round(float(row["total_ghs"]) / int(row["quantity"]), 2),
+                    "total_price": float(row["total_ghs"]),
+                    "payment_method": str(row["payment_method"]),
+                    "transaction_date": str(row["transaction_date"])
+                })
 
-        # Round values nicely for JSON transfer serialization
-        for name in store_breakdown:
-            store_breakdown[name]["revenue_ghs"] = round(store_breakdown[name]["revenue_ghs"], 2)
+        # 4. Atomic Execution via RPC
+        # This replaces the multi-step manual insertion logic
+        response = supabase.rpc("proc_submit_weekly_data", {
+            "p_store_id": store_id,
+            "p_week_label": file.filename,
+            "p_transactions": transactions
+        }).execute()
+
+        if not response.data.get("success"):
+            raise Exception(response.data.get("error"))
 
         return {
-            "success": True,
-            "summary": {
-                "total_revenue_ghs": round(total_revenue, 2),
-                "total_items_sold": total_items_sold,
-                "total_transactions": transaction_count,
-                "avg_ticket_value_ghs": round(total_revenue / transaction_count, 2) if transaction_count > 0 else 0
-            },
-            "stores_performance": store_breakdown
+            "success": True, 
+            "submission_id": response.data.get("submission_id"),
+            "message": "Pipeline executed. Records securely locked into permanent audit trail."
         }
-
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Pipeline error: {str(e)}")

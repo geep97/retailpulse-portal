@@ -19,9 +19,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 admin_supabase: Client = create_client(SUPABASE_URL, SERVICE_ROLE_KEY)
 
 # --- SQLAlchemy Setup ---
-db_password = os.getenv("SUPABASE_PASSWORD")
-db_id = os.getenv("SUPABASE_ID")
-SQLALCHEMY_DATABASE_URL = f"postgresql://postgres:{db_password}@db.{db_id}.supabase.co:5432/postgres"
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL")
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

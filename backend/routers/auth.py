@@ -6,7 +6,6 @@ from models import User
 from sqlalchemy.orm import Session
 from typing import Literal
 
-
 router = APIRouter(tags=["Authentication"])
 security = HTTPBearer()
 
@@ -57,26 +56,46 @@ def role_required(*roles):
         if user.role not in roles:
             raise HTTPException(status_code=403, detail="You do not have permission to perform this action")
         return user
+
     return Depends(checker)
 
 
 @router.post("/login")
-async def login(credentials: LoginRequest):
+# UPDATE: Added db: Session dependency to allow querying local database for roles
+async def login(credentials: LoginRequest, db: Session = Depends(get_db)):
     try:
+        # 1. Authenticate with Supabase
         response = supabase.auth.sign_in_with_password({
             "email": credentials.email,
             "password": credentials.password
         })
-        return {"access_token": response.session.access_token, "token_type": "bearer"}
+
+        # 2. Extract Auth ID
+        auth_id = str(response.user.id)
+
+        # UPDATE: Fetch local profile to get user role
+        user_profile = db.query(User).filter(User.auth_provider_id == auth_id).first()
+
+        if not user_profile:
+            raise HTTPException(status_code=404, detail="User profile not found in database")
+
+        # UPDATE: Return the role alongside the access token
+        return {
+            "access_token": response.session.access_token,
+            "token_type": "bearer",
+            "role": user_profile.role
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=401, detail=f"Login failed: {str(e)}")
 
 
 @router.post("/admin/create-user")
 async def create_user(
-    user_data: CreateUserRequest,
-    db: Session = Depends(get_db),
-    current_user=role_required("ops")
+        user_data: CreateUserRequest,
+        db: Session = Depends(get_db),
+        current_user=role_required("ops")
 ):
     try:
         # prevent duplicate ops user

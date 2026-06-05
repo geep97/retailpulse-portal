@@ -6,7 +6,6 @@ from models import User
 from sqlalchemy.orm import Session
 from typing import Literal
 
-
 router = APIRouter(tags=["Authentication"])
 security = HTTPBearer()
 
@@ -57,31 +56,55 @@ def role_required(*roles):
         if user.role not in roles:
             raise HTTPException(status_code=403, detail="You do not have permission to perform this action")
         return user
+
     return Depends(checker)
 
 
 @router.post("/login")
-async def login(credentials: LoginRequest):
+# UPDATE: Added db: Session dependency to allow querying local database for roles
+async def login(credentials: LoginRequest, db: Session = Depends(get_db)):
     try:
+        # 1. Authenticate with Supabase
         response = supabase.auth.sign_in_with_password({
             "email": credentials.email,
             "password": credentials.password
         })
-        return {"access_token": response.session.access_token, "token_type": "bearer"}
+
+        # 2. Extract Auth ID
+        auth_id = str(response.user.id)
+
+        # UPDATE: Fetch local profile to get user role
+        user_profile = db.query(User).filter(User.auth_provider_id == auth_id).first()
+
+        if not user_profile:
+            raise HTTPException(status_code=404, detail="User profile not found in database")
+
+        # UPDATE: Return the role alongside the access token
+        return {
+            "access_token": response.session.access_token,
+            "token_type": "bearer",
+            "role": user_profile.role
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=401, detail=f"Login failed: {str(e)}")
 
 
-
-
-@router.post("/admin/create-user", dependencies=[role_required("ops")])
+@router.post("/admin/create-user")
 async def create_user(
-    user_data: CreateUserRequest,
-    db: Session = Depends(get_db),
-    user=Depends(get_current_user)
+        user_data: CreateUserRequest,
+        db: Session = Depends(get_db),
+        current_user=role_required("ops")
 ):
     try:
-        # Create user in Supabase Auth
+        # prevent duplicate ops user
+        if user_data.role == "ops":
+            existing_ops = db.query(User).filter(User.role == "ops").count()
+            if existing_ops >= 1:
+                raise HTTPException(status_code=400, detail="An ops user already exists. Only one ops user is allowed.")
+
+        # create in Supabase auth
         response = admin_supabase.auth.admin.create_user({
             "email": user_data.email,
             "password": user_data.password,
@@ -90,54 +113,31 @@ async def create_user(
 
         auth_id = str(response.user.id)
 
-        print(f"Supabase User ID: {auth_id}")
-
-        # Check if profile already exists
-        profile = db.query(User).filter(
-            User.id == auth_id
-        ).first()
+        # check if profile already exists
+        profile = db.query(User).filter(User.id == auth_id).first()
 
         if profile:
-            # Update missing auth_provider_id
             profile.auth_provider_id = auth_id
             profile.username = user_data.username
             profile.role = user_data.role
-
             db.commit()
+            return {"message": "Existing profile updated", "user": response.user}
 
-            return {
-                "message": "Existing profile updated",
-                "user": response.user
-            }
-
-        # Create new profile
+        # create new profile
         new_profile = User(
             id=auth_id,
             username=user_data.username,
             role=user_data.role,
             auth_provider_id=auth_id
         )
-
         db.add(new_profile)
         db.commit()
         db.refresh(new_profile)
 
-        print(
-            f"Created profile: id={auth_id}, auth_provider_id={auth_id}"
-        )
-
-        return {
-            "message": "User created successfully",
-            "user": response.user
-        }
+        return {"message": "User created successfully", "user": response.user}
 
     except HTTPException:
         raise
-
     except Exception as e:
         db.rollback()
-        print("ERROR:", str(e))
-        raise HTTPException(
-            status_code=400,
-            detail=str(e)
-        )
+        raise HTTPException(status_code=400, detail=str(e))

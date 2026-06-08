@@ -29,14 +29,12 @@ def apply_inventory_store_filter(query, user):
 
 
 def get_current_iso_week() -> tuple[int, int]:
-    """Returns (iso_year, iso_week) for today."""
     today = date.today()
     iso = today.isocalendar()
     return iso[0], iso[1]
 
 
 def get_week_revenue(db, user, iso_year: int, iso_week: int) -> float:
-    """Sum revenue for a specific ISO year+week."""
     query = db.query(func.sum(Transaction.total_price)).filter(
         extract("isoyear", Transaction.transaction_date) == iso_year,
         extract("week", Transaction.transaction_date) == iso_week,
@@ -46,7 +44,6 @@ def get_week_revenue(db, user, iso_year: int, iso_week: int) -> float:
 
 
 def get_week_transactions(db, user, iso_year: int, iso_week: int) -> int:
-    """Count transactions for a specific ISO year+week."""
     query = db.query(func.count(Transaction.transaction_id)).filter(
         extract("isoyear", Transaction.transaction_date) == iso_year,
         extract("week", Transaction.transaction_date) == iso_week,
@@ -56,7 +53,6 @@ def get_week_transactions(db, user, iso_year: int, iso_week: int) -> int:
 
 
 def get_week_avg_basket(db, user, iso_year: int, iso_week: int) -> float:
-    """Avg basket for a specific ISO year+week."""
     query = db.query(func.avg(Transaction.total_price)).filter(
         extract("isoyear", Transaction.transaction_date) == iso_year,
         extract("week", Transaction.transaction_date) == iso_week,
@@ -66,11 +62,7 @@ def get_week_avg_basket(db, user, iso_year: int, iso_week: int) -> float:
 
 
 def prev_iso_week(iso_year: int, iso_week: int) -> tuple[int, int]:
-    """Returns the (iso_year, iso_week) for the week before."""
-    # Go back 7 days from a date known to be in iso_year/iso_week
-    # Jan 4 is always in ISO week 1 of its year
     jan4 = date(iso_year, 1, 4)
-    # Monday of iso_week
     monday = jan4 + timedelta(weeks=iso_week - 1) - timedelta(days=jan4.weekday())
     prev_monday = monday - timedelta(weeks=1)
     iso = prev_monday.isocalendar()
@@ -84,15 +76,14 @@ def pct_change(current: float, previous: float) -> float | None:
 
 
 def week_label(iso_year: int, iso_week: int) -> str:
-    """Human-readable label like 'Week 18 · May 2024'."""
     jan4 = date(iso_year, 1, 4)
     monday = jan4 + timedelta(weeks=iso_week - 1) - timedelta(days=jan4.weekday())
     month_name = monday.strftime("%b %Y")
     return f"Week {iso_week} · {month_name}"
 
+
 @router.get("/me")
 async def get_me(user=Depends(get_current_user)):
-    """Securely returns the current user profile."""
     return user
 
 
@@ -102,7 +93,6 @@ async def get_summary(
     user=Depends(get_current_user)
 ):
     try:
-        # ── All-time aggregates ───────────────────────────
         total_revenue_query = db.query(func.sum(Transaction.total_price))
         total_revenue_query = apply_store_filter(total_revenue_query, user)
         total_revenue = float(total_revenue_query.scalar() or 0)
@@ -115,14 +105,12 @@ async def get_summary(
         avg_basket_query = apply_store_filter(avg_basket_query, user)
         avg_basket = float(round(avg_basket_query.scalar() or 0, 2))
 
-        # ── Stock alerts ──────────────────────────────────
         stock_alert_query = db.query(func.count(Inventory.inventory_id)).filter(
             Inventory.stock_quantity < Inventory.reorder_level
         )
         stock_alert_query = apply_inventory_store_filter(stock_alert_query, user)
         stock_alert_count = int(stock_alert_query.scalar() or 0)
 
-        # ── Current & previous week stats ─────────────────
         cur_year, cur_week = get_current_iso_week()
         prv_year, prv_week = prev_iso_week(cur_year, cur_week)
 
@@ -135,7 +123,6 @@ async def get_summary(
         cur_avg_basket = get_week_avg_basket(db, user, cur_year, cur_week)
         prv_avg_basket = get_week_avg_basket(db, user, prv_year, prv_week)
 
-        # ── Week submitted check ──────────────────────────
         week_submitted = False
         if user["role"] == "manager" and user["store_id"]:
             submission = db.query(Submission).filter(
@@ -145,7 +132,6 @@ async def get_summary(
             ).first()
             week_submitted = submission is not None
 
-        # ── User profile & store ──────────────────────────
         user_profile = db.query(User).filter(User.id == user["id"]).first()
         user_name = user_profile.username if user_profile else None
 
@@ -162,20 +148,15 @@ async def get_summary(
             "total_transactions": total_transactions,
             "avg_basket": avg_basket,
             "stock_alert_count": stock_alert_count,
-
-            # Current week metrics
             "week_number": cur_week,
             "week_label": week_label(cur_year, cur_week),
             "week_submitted": week_submitted,
             "week_revenue": cur_revenue,
             "week_transactions": cur_transactions,
             "week_avg_basket": cur_avg_basket,
-
-            # Week-on-week deltas (null if no previous data)
             "revenue_delta_pct": pct_change(cur_revenue, prv_revenue),
             "transactions_delta_pct": pct_change(cur_transactions, prv_transactions),
             "avg_basket_delta_pct": pct_change(cur_avg_basket, prv_avg_basket),
-
             "store_id": user["store_id"],
             "store_name": store_name,
             "store_location": store_location,
@@ -195,7 +176,6 @@ async def get_revenue_trend(
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
-    """Returns the last 8 ISO weeks of revenue, each labelled W{n}."""
     try:
         iso_year = extract("isoyear", Transaction.transaction_date).label("iso_year")
         iso_week = extract("week", Transaction.transaction_date).label("iso_week")
@@ -236,20 +216,23 @@ async def get_revenue_trend(
 @router.get("/ops-summary")
 async def get_ops_summary(
     db: Session = Depends(get_db),
-    user=Depends(get_current_user)
+    user=Depends(get_current_user),
+    iso_year: int | None = None,
+    iso_week: int | None = None,
 ):
-
     if user["role"] != "ops":
         raise HTTPException(status_code=403, detail="Ops only")
 
     try:
-        cur_year, cur_week = get_current_iso_week()
+        if iso_year and iso_week:
+            cur_year, cur_week = iso_year, iso_week
+        else:
+            cur_year, cur_week = get_current_iso_week()
+
         prv_year, prv_week = prev_iso_week(cur_year, cur_week)
 
-        # ── All stores ────────────────────────────────────
         stores = db.query(Store).all()
 
-        # ── Per-store week revenue ────────────────────────
         store_revenues = (
             db.query(
                 Transaction.store_id,
@@ -266,7 +249,6 @@ async def get_ops_summary(
         rev_map  = {r.store_id: float(r.revenue) for r in store_revenues}
         txns_map = {r.store_id: int(r.txns)     for r in store_revenues}
 
-        # Previous week total transactions for delta
         prv_txns_total = (
             db.query(func.count(Transaction.transaction_id))
             .filter(
@@ -277,14 +259,12 @@ async def get_ops_summary(
         )
         cur_txns_total = sum(txns_map.values())
 
-        # ── Submissions this week ─────────────────────────
         submissions = db.query(Submission).filter(
             extract("isoyear", Submission.week_start) == cur_year,
             extract("week",    Submission.week_start) == cur_week,
         ).all()
         sub_map = {s.store_id: s for s in submissions}
 
-        # ── Build per-store list ──────────────────────────
         max_revenue = max((rev_map.get(s.store_id, 0) for s in stores), default=1) or 1
 
         store_stats = []
@@ -292,36 +272,36 @@ async def get_ops_summary(
             rev = rev_map.get(store.store_id, 0)
             sub = sub_map.get(store.store_id)
             store_stats.append({
-                "store_id":      store.store_id,
-                "store_name":    store.store_name,
-                "location":      store.location,
-                "week_revenue":  rev,
+                "store_id":          store.store_id,
+                "store_name":        store.store_name,
+                "location":          store.location,
+                "week_revenue":      rev,
                 "week_transactions": txns_map.get(store.store_id, 0),
-                "submitted":     sub is not None,
-                "submitted_at":  sub.submitted_at.isoformat() if sub and sub.submitted_at else None,
-                "pct_of_max":    round((rev / max_revenue) * 100, 1),
+                "submitted":         sub is not None,
+                "submitted_at":      sub.submitted_at.isoformat() if sub and sub.submitted_at else None,
+                "pct_of_max":        round((rev / max_revenue) * 100, 1),
             })
 
-        # Sort by revenue desc
         store_stats.sort(key=lambda x: x["week_revenue"], reverse=True)
 
-        # ── Top store ─────────────────────────────────────
         top = store_stats[0] if store_stats else None
         avg_rev = (sum(s["week_revenue"] for s in store_stats) / len(store_stats)) if store_stats else 0
         top_vs_avg = round(((top["week_revenue"] - avg_rev) / avg_rev) * 100, 1) if top and avg_rev > 0 else None
 
-        # ── Pending stores ────────────────────────────────
         pending_stores = [s["store_name"] for s in store_stats if not s["submitted"]]
 
         return {
-            "stores":                store_stats,
-            "top_store_name":        top["store_name"] if top else None,
-            "top_store_revenue":     top["week_revenue"] if top else 0,
-            "top_store_vs_avg_pct":  top_vs_avg,
+            "stores":                 store_stats,
+            "top_store_name":         top["store_name"] if top else None,
+            "top_store_revenue":      top["week_revenue"] if top else 0,
+            "top_store_vs_avg_pct":   top_vs_avg,
             "transactions_delta_pct": pct_change(cur_txns_total, int(prv_txns_total)),
-            "pending_stores":        pending_stores,
-            "submitted_count":       len(sub_map),
-            "total_stores":          len(stores),
+            "pending_stores":         pending_stores,
+            "submitted_count":        len(sub_map),
+            "total_stores":           len(stores),
+            "week_label":             week_label(cur_year, cur_week),
+            "iso_year":               cur_year,
+            "iso_week":               cur_week,
         }
 
     except HTTPException:
@@ -331,12 +311,99 @@ async def get_ops_summary(
         raise HTTPException(status_code=500, detail="Failed to load ops summary")
 
 
+def iso_weeks_in_year(year: int) -> int:
+    """Return 52 or 53 — the number of ISO weeks in a given year."""
+    # A year has 53 ISO weeks if Jan 1 or Dec 31 falls on a Thursday
+    from datetime import date
+    jan1_dow = date(year, 1, 1).weekday()   # 0=Mon, 3=Thu
+    dec31_dow = date(year, 12, 31).weekday()
+    return 53 if jan1_dow == 3 or dec31_dow == 3 else 52
+
+
+def _all_weeks_between(
+    start_year: int, start_week: int,
+    end_year: int,   end_week: int,
+) -> list[tuple[int, int]]:
+    """
+    Return every (iso_year, iso_week) pair from (start) to (end) inclusive,
+    newest first.
+    """
+    weeks = []
+    y, w = end_year, end_week
+    while (y, w) >= (start_year, start_week):
+        weeks.append((y, w))
+        w -= 1
+        if w == 0:
+            y -= 1
+            w = iso_weeks_in_year(y)
+    return weeks
+
+
+@router.get("/available-weeks")
+async def get_available_weeks(
+        db: Session = Depends(get_db),
+        user=Depends(get_current_user),
+):
+    # Updated: Allow 'ops' AND 'manager' roles
+    if user["role"] not in ["ops", "manager"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    try:
+        # Find the earliest week that has any transaction data
+        query = db.query(
+            extract("isoyear", Transaction.transaction_date).label("iso_year"),
+            extract("week", Transaction.transaction_date).label("iso_week"),
+        )
+
+        # Apply filters so managers only see weeks relevant to their store's data
+        query = apply_store_filter(query, user)
+
+        earliest = (
+            query
+            .order_by(
+                extract("isoyear", Transaction.transaction_date).asc().nulls_last(),
+                extract("week", Transaction.transaction_date).asc().nulls_last(),
+            )
+            .first()
+        )
+
+        cur_year, cur_week = get_current_iso_week()
+
+        if earliest is None or earliest.iso_year is None:
+            return {
+                "weeks": [{
+                    "iso_year": cur_year,
+                    "iso_week": cur_week,
+                    "week_label": week_label(cur_year, cur_week) + " (current)",
+                }]
+            }
+
+        start_year = int(earliest.iso_year)
+        start_week = int(earliest.iso_week)
+
+        all_pairs = _all_weeks_between(start_year, start_week, cur_year, cur_week)
+
+        weeks = []
+        for i, (y, w) in enumerate(all_pairs):
+            label = week_label(y, w)
+            if i == 0:
+                label += " (current)"
+            weeks.append({"iso_year": y, "iso_week": w, "week_label": label})
+
+        return {"weeks": weeks}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Available weeks error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load available weeks")
+
+
 @router.get("/top-products")
 async def get_top_products(
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
-    """Returns top 5 products by revenue with real product names."""
     try:
         query = db.query(
             Transaction.product_id,
@@ -358,10 +425,10 @@ async def get_top_products(
         return {
             "data": [
                 {
-                    "product_id": row.product_id,
-                    "product_name": row.product_name,
+                    "product_id":    row.product_id,
+                    "product_name":  row.product_name,
                     "total_revenue": float(row.total_revenue),
-                    "total_units": int(row.total_units),
+                    "total_units":   int(row.total_units),
                 }
                 for row in results
             ]

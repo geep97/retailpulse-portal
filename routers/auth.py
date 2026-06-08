@@ -71,7 +71,6 @@ def role_required(*roles):
 
 @router.get("/me")
 async def get_me(user=Depends(get_current_user)):
-    """Securely returns the current user profile if the cookie is valid."""
     return user
 
 @router.post("/login")
